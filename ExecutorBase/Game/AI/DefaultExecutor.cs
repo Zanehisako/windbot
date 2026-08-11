@@ -360,6 +360,8 @@ namespace WindBot.Game.AI
         /// <returns>BattlePhaseAction including the target, or null (in this situation, GameAI will check the next attacker)</returns>
         public override BattlePhaseAction OnSelectAttackTarget(ClientCard attacker, IList<ClientCard> defenders)
         {
+            ClientCard bestDefender = null;
+            int bestScore = int.MinValue;
             foreach (ClientCard defender in defenders)
             {
                 attacker.RealPower = attacker.Attack;
@@ -368,8 +370,30 @@ namespace WindBot.Game.AI
                     continue;
 
                 if (attacker.RealPower > defender.RealPower || (attacker.RealPower >= defender.RealPower && attacker.IsLastAttacker && defender.IsAttack()))
-                    return AI.Attack(attacker, defender);
+                {
+                    // Prefer targets that both deal damage and remove a threat, then dangerous
+                    // monsters we can destroy, then the biggest wall we can beat.
+                    int score = 0;
+                    if (defender.IsAttack())
+                        score += 2000;
+                    if (defender.IsMonsterDangerous())
+                        score += 1000;
+                    if (defender.IsMonsterInvincible())
+                        score += 400;
+                    score += Math.Min(defender.RealPower, 1000);
+                    if (attacker.RealPower > defender.RealPower)
+                        score += 500;
+
+                    if (score > bestScore)
+                    {
+                        bestScore = score;
+                        bestDefender = defender;
+                    }
+                }
             }
+
+            if (bestDefender != null)
+                return AI.Attack(attacker, bestDefender);
 
             if (attacker.CanDirectAttack)
                 return AI.Attack(attacker, null);
@@ -521,6 +545,9 @@ namespace WindBot.Game.AI
                 return false;
             if ((card.Location == CardLocation.Hand || card.Location == CardLocation.SpellZone && card.IsFacedown()) &&
                 (card.IsSpell() && DefaultSpellWillBeNegated() || card.IsTrap() && DefaultTrapWillBeNegated()))
+                return false;
+            // Don't waste a monster effect that is currently negated on the field (e.g. under Skill Drain).
+            if (card.Location == CardLocation.MonsterZone && card.IsDisabled())
                 return false;
             return true;
         }

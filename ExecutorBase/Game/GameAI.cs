@@ -227,13 +227,25 @@ namespace WindBot.Game
         /// <returns>A new BattlePhaseAction containing the action to do.</returns>
         public BattlePhaseAction OnSelectBattleCmd(BattlePhase battle)
         {
+            // Sort the attackers and defenders, make monster with higher attack go first.
+            List<ClientCard> attackers = new List<ClientCard>(battle.AttackableCards);
+            attackers.Sort(CardContainer.CompareCardAttack);
+            attackers.Reverse();
+
+            List<ClientCard> defenders = new List<ClientCard>(Duel.Fields[1].GetMonsters());
+            defenders.Sort(CardContainer.CompareDefensePower);
+            defenders.Reverse();
+
+            // If we can finish the game this turn, don't let executor rules skip the battle phase.
+            bool canFinish = CanFinishGame(attackers, defenders);
+
             foreach (CardExecutor exec in Executor.Executors)
             {
-                if (exec.Type == ExecutorType.GoToMainPhase2 && battle.CanMainPhaseTwo && exec.Func()) // check if should enter main phase 2 directly
+                if (exec.Type == ExecutorType.GoToMainPhase2 && battle.CanMainPhaseTwo && exec.Func() && !canFinish) // check if should enter main phase 2 directly
                 {
                     return ToMainPhase2();
                 }
-                if (exec.Type == ExecutorType.GoToEndPhase && battle.CanEndPhase && exec.Func()) // check if should enter end phase directly
+                if (exec.Type == ExecutorType.GoToEndPhase && battle.CanEndPhase && exec.Func() && !canFinish) // check if should enter end phase directly
                 {
                     return ToEndPhase();
                 }
@@ -247,15 +259,6 @@ namespace WindBot.Game
                     }
                 }
             }
-
-            // Sort the attackers and defenders, make monster with higher attack go first.
-            List<ClientCard> attackers = new List<ClientCard>(battle.AttackableCards);
-            attackers.Sort(CardContainer.CompareCardAttack);
-            attackers.Reverse();
-
-            List<ClientCard> defenders = new List<ClientCard>(Duel.Fields[1].GetMonsters());
-            defenders.Sort(CardContainer.CompareDefensePower);
-            defenders.Reverse();
 
             // Let executor decide which card should attack first.
             ClientCard selected = Executor.OnSelectAttacker(attackers, defenders);
@@ -297,6 +300,65 @@ namespace WindBot.Game
                 return Attack(attackers[0], (defenders.Count == 0) ? null : defenders[0]);
 
             return battle.CanMainPhaseTwo ? ToMainPhase2() : ToEndPhase();
+        }
+
+        /// <summary>
+        /// Conservative check: can we deal lethal damage this turn with the given attackers?
+        /// Used only to prevent skipping a winnable battle phase; each actual attack still
+        /// goes through the safe target selection (OnPreBattleBetween / OnSelectAttackTarget).
+        /// </summary>
+        private bool CanFinishGame(List<ClientCard> attackers, List<ClientCard> defenders)
+        {
+            if (attackers.Count == 0)
+                return false;
+
+            int lp = Duel.Fields[1].LifePoints;
+            if (lp <= 0)
+                return true;
+
+            // Greedy: clear all defenders with the smallest attackers able to beat them,
+            // then direct attack with whatever remains. Only counts plain power comparisons,
+            // no piercing damage, so it can't overestimate.
+            List<ClientCard> available = new List<ClientCard>(attackers);
+            List<ClientCard> targets = new List<ClientCard>(defenders);
+
+            int damage = 0;
+            while (targets.Count > 0)
+            {
+                // Clear attack-position defenders first: they threaten us and give battle damage.
+                ClientCard target = null;
+                foreach (ClientCard d in targets)
+                {
+                    if (d.IsAttack())
+                    {
+                        target = d;
+                        break;
+                    }
+                }
+                if (target == null)
+                    target = targets[0];
+
+                ClientCard killer = null;
+                foreach (ClientCard a in available)
+                {
+                    if (a.Attack > target.GetDefensePower())
+                    {
+                        killer = a;
+                        break;
+                    }
+                }
+                if (killer == null)
+                    return false;
+
+                available.Remove(killer);
+                targets.Remove(target);
+
+                if (target.IsAttack())
+                    damage += killer.Attack - target.GetDefensePower();
+            }
+
+            damage += available.Sum(a => a.Attack);
+            return damage >= lp;
         }
 
         /// <summary>
@@ -367,17 +429,87 @@ namespace WindBot.Game
             if (selector != null)
                 return selector.Select(cards, min, max);
 
-            // Always select the first available cards and choose the minimum.
+            // Smarter generic selection: pick the most relevant cards instead of blindly the first ones.
             IList<ClientCard> selected = new List<ClientCard>();
 
             if (hint == HintMsg.AttackTarget && cancelable) return selected;
 
             if (cards.Count >= min)
             {
+                List<ClientCard> ordered = new List<ClientCard>(cards);
+                bool allEnemy = true;
+                bool allMine = true;
+                foreach (ClientCard card in ordered)
+                {
+                    if (card.Controller != 1) allEnemy = false;
+                    if (card.Controller != 0) allMine = false;
+                }
+
+                if (allEnemy)
+                {
+                    // Choosing an opponent's card as a target: remove the biggest threat first.
+                    ordered.Sort((a, b) => ThreatValue(b).CompareTo(ThreatValue(a)));
+                }
+                else if (allMine)
+                {
+                    // When paying a cost (discard/tribute/send), get rid of the least useful card;
+                    // otherwise we are searching/adding and want the most useful card.
+                    bool costMode = (hint == HintMsg.Discard || hint == HintMsg.Release || hint == HintMsg.Tribute
+                        || hint == HintMsg.ToGrave || hint == HintMsg.Remove || hint == HintMsg.ReturnToHand || hint == HintMsg.ToDeck);
+                    if (costMode)
+                        ordered.Sort((a, b) => SearchValue(a).CompareTo(SearchValue(b)));
+                    else
+                        ordered.Sort((a, b) => SearchValue(b).CompareTo(SearchValue(a)));
+                }
+
                 for (int i = 0; i < min; ++i)
-                    selected.Add(cards[i]);
+                    selected.Add(ordered[i]);
             }
             return selected;
+        }
+
+        /// <summary>
+        /// How useful a card is to search / keep in hand, used by the generic OnSelectCard fallback.
+        /// </summary>
+        private int SearchValue(ClientCard card)
+        {
+            int value = 0;
+            // Avoid dead duplicates we already hold or control.
+            if (Duel.Fields[0].Hand.Any(c => c.IsCode(card.Id)) || Duel.Fields[0].GetMonsters().Any(c => c.IsCode(card.Id)))
+                value -= 100;
+            if (card.IsMonster())
+            {
+                value += card.Attack;
+                value += card.Defense / 10;
+            }
+            else if (card.IsSpell() || card.IsTrap())
+            {
+                value += 60;
+            }
+            return value;
+        }
+
+        /// <summary>
+        /// How dangerous an opponent's card is, used to pick the best removal / negation target.
+        /// </summary>
+        private int ThreatValue(ClientCard card)
+        {
+            int value = 0;
+            if (card.IsMonster())
+            {
+                if (card.IsAttack()) value += 100;
+                if (card.IsMonsterDangerous()) value += 250;
+                if (card.IsMonsterInvincible()) value += 150;
+                if (card.IsDisabled()) value -= 100;
+                value += card.Attack;
+                value += card.Defense / 10;
+            }
+            else if (card.IsSpell() || card.IsTrap())
+            {
+                value += 80;
+                if (card.IsFacedown()) value += 20;
+            }
+            return value;
         }
 
         /// <summary>
@@ -403,8 +535,38 @@ namespace WindBot.Game
                     }
                 }
             }
-            // If we're forced to chain, we chain the first card. However don't do anything.
-            return forced ? 0 : -1;
+            // If we're not forced, don't waste a card on a generic chain.
+            if (!forced)
+                return -1;
+
+            // Forced chain with no specific rule: pick the card most likely to be a useful response
+            // (a committed set SpellZone card or a trap beats a card we'd rather keep in hand).
+            int best = 0;
+            int bestValue = int.MinValue;
+            for (int i = 0; i < cards.Count; ++i)
+            {
+                int value = ChainValue(cards[i]);
+                if (value > bestValue)
+                {
+                    bestValue = value;
+                    best = i;
+                }
+            }
+            _dialogs.SendChaining(cards[best].Name);
+            return best;
+        }
+
+        /// <summary>
+        /// How useful it is to chain this card right now, used by the forced generic chain fallback.
+        /// </summary>
+        private static int ChainValue(ClientCard card)
+        {
+            int value = 0;
+            if (card.Location == CardLocation.SpellZone) value += 100; // already committed, use it now
+            if (card.IsTrap()) value += 50;
+            if (card.HasType(CardType.QuickPlay)) value += 30;
+            if (card.Location == CardLocation.Hand) value -= 50; // prefer to keep hand resources
+            return value;
         }
 
         /// <summary>
@@ -477,6 +639,15 @@ namespace WindBot.Game
         public MainPhaseAction OnSelectIdleCmd(MainPhase main)
         {
             CheckSurrender();
+
+            // Prefer to summon the most valuable monster first, and to avoid summoning a card we
+            // already control when a different one is available. Only affects the generic fallback:
+            // deck executors with specific rules still take priority through the executor loop.
+            List<ClientCard> summonable = new List<ClientCard>(main.SummonableCards);
+            summonable.Sort((a, b) => SummonValue(b).CompareTo(SummonValue(a)));
+            List<ClientCard> spSummonable = new List<ClientCard>(main.SpecialSummonableCards);
+            spSummonable.Sort((a, b) => SummonValue(b).CompareTo(SummonValue(a)));
+
             foreach (CardExecutor exec in Executor.Executors)
             {
                 if (exec.Type == ExecutorType.GoToEndPhase && main.CanEndPhase && exec.Func()) // check if should enter end phase directly
@@ -513,7 +684,7 @@ namespace WindBot.Game
                     if (ShouldExecute(exec, card, ExecutorType.Repos))
                         return new MainPhaseAction(MainPhaseAction.MainAction.Repos, card.ActionIndex);
                 }
-                foreach (ClientCard card in main.SpecialSummonableCards)
+                foreach (ClientCard card in spSummonable)
                 {
                     if (ShouldExecute(exec, card, ExecutorType.SpSummon))
                     {
@@ -521,7 +692,7 @@ namespace WindBot.Game
                         return new MainPhaseAction(MainPhaseAction.MainAction.SpSummon, card.ActionIndex);
                     }
                 }
-                foreach (ClientCard card in main.SummonableCards)
+                foreach (ClientCard card in summonable)
                 {
                     if (ShouldExecute(exec, card, ExecutorType.Summon))
                     {
@@ -551,6 +722,22 @@ namespace WindBot.Game
 
             _dialogs.SendEndTurn();
             return new MainPhaseAction(MainPhaseAction.MainAction.ToEndPhase);
+        }
+
+        /// <summary>
+        /// How valuable it is to summon this monster, used to order the generic summon fallback.
+        /// </summary>
+        private static int SummonValue(ClientCard card)
+        {
+            int value = 0;
+            if (card.IsMonster())
+            {
+                if (card.Level >= 5) value += 50;
+                value += card.Attack;
+                value += card.Defense / 10;
+                if (card.IsDisabled()) value -= 100;
+            }
+            return value;
         }
 
         /// <summary>
