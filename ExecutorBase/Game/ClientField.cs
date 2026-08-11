@@ -14,6 +14,7 @@ namespace WindBot.Game
         public IList<ClientCard> Banished { get; private set; }
         public IList<ClientCard> Deck { get; private set; }
         public IList<ClientCard> ExtraDeck { get; private set; }
+        public IList<ClientCard> Powers { get; private set; }
 
         public int LifePoints;
         public ClientCard BattlingMonster;
@@ -24,7 +25,7 @@ namespace WindBot.Game
         {
         }
 
-        public void Init(int deck, int extra)
+        public void Init(int deck, int extra, int powers)
         {
             Hand = new List<ClientCard>();
             MonsterZone = new ClientCard[7];
@@ -33,12 +34,15 @@ namespace WindBot.Game
             Banished = new List<ClientCard>();
             Deck = new List<ClientCard>();
             ExtraDeck = new List<ClientCard>();
+            Powers = new List<ClientCard>();
             HintDescriptions = new HashSet<long>();
 
             for (int i = 0; i < deck; ++i)
                 Deck.Add(new ClientCard(0, CardLocation.Deck, -1, 0));
             for (int i = 0; i < extra; ++i)
                 ExtraDeck.Add(new ClientCard(0, CardLocation.Extra, -1, 0));
+            for (int i = 0; i < powers; ++i)
+                Powers.Add(new ClientCard(0, CardLocation.Extra, -1, 0));
         }
 
         public void Clear()

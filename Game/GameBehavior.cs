@@ -214,6 +214,7 @@ namespace WindBot.Game
             _ai.Duel.IsNewRule2020 = (duel_flag & DUEL_FSX_MMZONE) != 0;
             BinaryWriter deck = GamePacketFactory.Create(CtosMessage.UpdateDeck);
             deck.Write(Deck.Cards.Count + Deck.ExtraCards.Count);
+            deck.Write(0); // powers
             deck.Write(Deck.SideCards.Count);
             foreach (int card in Deck.Cards)
                 deck.Write(card);
@@ -229,6 +230,7 @@ namespace WindBot.Game
         {
             BinaryWriter deck = GamePacketFactory.Create(CtosMessage.UpdateDeck);
             deck.Write(Deck.Cards.Count + Deck.ExtraCards.Count);
+            deck.Write(0); // powers
             deck.Write(Deck.SideCards.Count);
             foreach (int card in Deck.Cards)
                 deck.Write(card);
@@ -439,10 +441,12 @@ namespace WindBot.Game
             _duel.Fields[GetLocalPlayer(1)].LifePoints = packet.ReadInt32();
             int deck = packet.ReadInt16();
             int extra = packet.ReadInt16();
-            _duel.Fields[GetLocalPlayer(0)].Init(deck, extra);
+            int powers = packet.ReadInt16();
+            _duel.Fields[GetLocalPlayer(0)].Init(deck, extra, powers);
             deck = packet.ReadInt16();
             extra = packet.ReadInt16();
-            _duel.Fields[GetLocalPlayer(1)].Init(deck, extra);
+            powers = packet.ReadInt16();
+            _duel.Fields[GetLocalPlayer(1)].Init(deck, extra, powers);
 
             // in case of ending duel in chain's solving
             _duel.CurrentChain.Clear();
