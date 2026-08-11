@@ -512,12 +512,23 @@ namespace WindBot.Game.AI.Decks
 
         private bool InfinityAbsorbEffect()
         {
-            // Attach an Attack Position opponent monster as material.
+            // Handles both quick effects of Infinity:
+            // 1) Negate an opponent's monster effect activation (chain response).
+            // 2) Attach an Attack Position opponent monster as material.
             if (Card.Location != CardLocation.MonsterZone) return false;
-            ClientCard target = Enemy.GetMonsters().FirstOrDefault(c => c.IsFaceup() && c.IsAttack() && !c.IsShouldNotBeTarget());
-            if (target == null) return false;
+
+            if (Duel.CurrentChainInfo.Count > 0)
+            {
+                ChainInfo last = Duel.CurrentChainInfo[Duel.CurrentChainInfo.Count - 1];
+                if (last.ActivatePlayer == 1 && last.RelatedCard != null && last.RelatedCard.IsMonster())
+                    return true;
+            }
+
             if (Duel.Player == 1 && Duel.Phase == DuelPhase.Battle)
                 return false;
+
+            ClientCard target = Enemy.GetMonsters().FirstOrDefault(c => c.IsFaceup() && c.IsAttack() && !c.IsShouldNotBeTarget());
+            if (target == null) return false;
             _infinityAbsorbTarget = target.Id;
             return true;
         }
